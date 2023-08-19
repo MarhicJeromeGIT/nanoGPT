@@ -7,6 +7,7 @@ from contextlib import nullcontext
 import torch
 import tiktoken
 from model import GPTConfig, GPT
+import resource
 
 # -----------------------------------------------------------------------------
 init_from = 'resume' # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
@@ -19,7 +20,7 @@ top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 p
 seed = 1337
 device = 'cpu' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
-compile = False # use PyTorch 2.0 to compile the model to be faster
+compile = True # use PyTorch 2.0 to compile the model to be faster
 exec(open('configurator.py').read()) # overrides from command line or config file
 # -----------------------------------------------------------------------------
 
@@ -35,7 +36,9 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 if init_from == 'resume':
     # init from a model saved in a specific directory
     ckpt_path = os.path.join(out_dir, 'ckpt.pt')
-    checkpoint = torch.load(ckpt_path, map_location=device)
+    checkpoint = torch.load(ckpt_path, map_location=device) # checkpoint : dict with 'model', 'optimizer', 'model_args', 'iter_num', 'best_val_loss', and 'config' keys
+    # model_args: {'n_layer': 6, 'n_head': 6, 'n_embd': 384, 'block_size': 256, 'bias': False, 'vocab_size': 65, 'dropout': 0.2}
+
     gptconf = GPTConfig(**checkpoint['model_args'])
     model = GPT(gptconf)
     state_dict = checkpoint['model']
@@ -43,14 +46,22 @@ if init_from == 'resume':
     for k,v in list(state_dict.items()):
         if k.startswith(unwanted_prefix):
             state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
-    model.load_state_dict(state_dict)
+
+    # Manually insert the biases if they are not in the checkpoint file
+    for i in range(gptconf.n_layer):
+        # if the key doesn't exist
+        if f"transformer.h.{i}.attn.bias" not in state_dict:
+          bias_tensor = torch.tril(torch.ones(gptconf.block_size, gptconf.block_size)).view(1, 1, gptconf.block_size, gptconf.block_size)
+          state_dict[f"transformer.h.{i}.attn.bias"] = bias_tensor
+
+    model.load_state_dict(state_dict, strict=True)
 elif init_from.startswith('gpt2'):
     # init from a given GPT-2 model
     model = GPT.from_pretrained(init_from, dict(dropout=0.0))
 
 model.eval()
 model.to(device)
-if compile:
+if compile: # TODO: Try me !
     model = torch.compile(model) # requires PyTorch 2.0 (optional)
 
 # look for the meta pickle in case it is available in the dataset folder
@@ -77,14 +88,25 @@ else:
 if start.startswith('FILE:'):
     with open(start[5:], 'r', encoding='utf-8') as f:
         start = f.read()
-start_ids = encode(start)
+start_ids = encode(start) # just a list of numbers, so far so good
 print("The device is ", device)
-x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
+x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...]) # [None, ...] adds a batch dimension (batch of 1, basically)
+# so the shape of x is now [1, len(start_ids)]
+
+x = x.repeat(num_samples, 1)
 
 # run generation
 with torch.no_grad():
     with ctx:
-        for k in range(num_samples):
-            y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
-            print(decode(y[0].tolist()))
-            print('---------------')
+        #for k in range(num_samples): # TODO: I should be able to do it in a batch instead
+        y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k) # y: [1, 526] (500 new tokens + 26 original tokens)
+
+        # Decode all the lists:
+        print('---------------')
+        for row in y:
+            print("row result :")
+            print(decode(row.tolist()))
+        print('---------------')
+
+max_memory_usage_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+print(f"Max Memory Usage: {max_memory_usage_kb} KB") # 1 sample: 650mb, 10 samples: 2 GB 
