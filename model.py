@@ -198,7 +198,15 @@ class GPT(nn.Module):
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
-            logits = self.lm_head(x)
+            # Note: this "predicts" the next token for EVERY token in the sequence
+            # so the cross-entropy loss will be applied to each token in the sequence, not just the last one.
+            logits = self.lm_head(x) # B, T, vocab_size
+            # logits.view(-1, logits.size(-1)) : This reshapes the logits tensor to a 2D tensor where each row corresponds to a token in the batch
+            # Before: 12 sequences of 64 tokens with 65 logits each.
+            # After: just one big sequence of 768 tokens. The xth position is an array of 65 floats representing the probabilities of the next token.
+            # and we have the "targets" as a ground truth to compare with and generate the loss. Pretty cool !
+
+
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position

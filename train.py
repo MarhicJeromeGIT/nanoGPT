@@ -115,6 +115,11 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 data_dir = os.path.join('data', dataset)
 train_data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
 val_data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+
+# This seem important :p
+# The output is a tuple (x,y)
+# each a tensor with shape [12, 64]
+# y is just x shifted by 1 (i.e. y[0] = x[1])
 def get_batch(split):
     data = train_data if split == 'train' else val_data
     ix = torch.randint(len(data) - block_size, (batch_size,))
@@ -212,10 +217,10 @@ if ddp:
 @torch.no_grad()
 def estimate_loss():
     out = {}
-    model.eval()
+    model.eval() # Not the "eval" and "train" mode switch (eval: batch normalization and dropout disabled)
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
-        for k in range(eval_iters):
+        for k in range(eval_iters): # 20
             X, Y = get_batch(split)
             with ctx:
                 logits, loss = model(X, Y)
